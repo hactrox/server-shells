@@ -25,7 +25,6 @@
 #
 # GENERAL OPTIONS:
 #   --upgrade     Run apt-get upgrade before installing packages
-#   --force-os    Continue on a non-Debian-13 host; compatibility is not guaranteed
 #   -h, --help    Show the complete command-line help
 #
 # User-owned files are assigned to the invoking account. When a non-root user
@@ -69,7 +68,6 @@ INSTALL_MYSQL=false
 INSTALL_SSM=false
 INSTALL_CLOUDWATCH=false
 UPGRADE_SYSTEM=false
-FORCE_OS=false
 
 STEP_NO=0
 TOTAL_STEPS=0
@@ -107,7 +105,6 @@ Options:
   --ec2                 Enable --upgrade, --go, --tmux, --ssm and --cloudwatch.
                         Other components still require explicit flags.
   --upgrade             Run apt-get upgrade before installing packages.
-  --force-os            Continue on a non-Debian-13 host (not recommended).
   -h, --help            Show this help.
 
 Examples:
@@ -173,10 +170,6 @@ parse_args() {
                 ;;
             --upgrade)
                 UPGRADE_SYSTEM=true
-                shift
-                ;;
-            --force-os)
-                FORCE_OS=true
                 shift
                 ;;
             -h|--help)
@@ -330,12 +323,8 @@ check_platform() {
     . /etc/os-release
 
     if [[ "${ID:-}" != debian || "${VERSION_ID:-}" != 13* ]]; then
-        if [[ "$FORCE_OS" == true ]]; then
-            warn "Expected Debian 13; detected ${PRETTY_NAME:-unknown}. Continuing due to --force-os."
-        else
-            fail "This script requires Debian 13; detected ${PRETTY_NAME:-unknown}."
-            exit 1
-        fi
+        fail "This script requires Debian 13; detected ${PRETTY_NAME:-unknown}."
+        exit 1
     fi
 
     DEB_ARCH="$(dpkg --print-architecture)"
