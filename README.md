@@ -96,7 +96,7 @@ sudo bash config_chronyc.sh
 
 ## Create an SSH user
 
-For Debian 13. Creates a user without sudo privileges and installs an Ed25519 SSH public key.
+For Debian 13. Creates a user without sudo privileges and installs an Ed25519 SSH public key. For an existing user without sudo privileges, appends the public key if it is missing.
 
 The SSH server must have public key authentication enabled and password and keyboard-interactive authentication disabled. The script checks these settings without changing them.
 
