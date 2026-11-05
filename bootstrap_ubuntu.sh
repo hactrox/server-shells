@@ -279,7 +279,7 @@ select_target_user() {
     # "sudo ./script.sh" has EUID=0 but SUDO_USER=admin, so user-level files
     # stay under /home/admin. If the session itself is root, root is a valid
     # target user and its home directory (/root) is used.
-    if [[ -n "${SUDO_USER:-}" ]]; then
+    if ((EUID == 0)) && [[ -n "${SUDO_USER:-}" ]]; then
         TARGET_USER="$SUDO_USER"
     else
         TARGET_USER="$(id -un)"
@@ -403,7 +403,7 @@ update_apt() {
     run_logged 'apt-get update' apt_env apt-get update
 
     if [[ "$UPGRADE_SYSTEM" == true ]]; then
-        run_logged 'Upgrading installed packages' apt_env apt-get upgrade -y
+        run_logged 'Upgrading installed packages' apt_env apt-get -o Dpkg::Options::=--force-confold upgrade -y
     else
         info 'System upgrade skipped (use --upgrade to enable it).'
     fi
@@ -542,6 +542,44 @@ resolve_go_checksum() {
     printf '%s\n' "$checksum"
 }
 
+# Stage on the destination filesystem so a failed download, extraction or rename
+# leaves the previous installation available. This subshell owns the EXIT trap.
+install_go_release() (
+    filename="$1"
+    checksum="$2"
+    [[ -d /usr/local ]] || as_root install -d -m 0755 /usr/local
+    stage="$(as_root mktemp -d /usr/local/.go-install.XXXXXX)"
+    cleanup_go_stage() {
+        if [[ ! -e /usr/local/go && ! -L /usr/local/go ]] &&
+           { as_root test -e "$stage/previous" || as_root test -L "$stage/previous"; }; then
+            as_root mv -T -- "$stage/previous" /usr/local/go || {
+                printf 'Restore the previous Go installation from %s/previous\n' "$stage" >&2
+                return 1
+            }
+        fi
+        as_root rm -rf -- "$stage"
+    }
+    trap cleanup_go_stage EXIT
+
+    curl -fsSL --retry 3 --retry-delay 2 "https://go.dev/dl/$filename" |
+        as_root tee "$stage/$filename" >/dev/null
+    printf '%s  %s\n' "$checksum" "$stage/$filename" | as_root sha256sum -c -
+    as_root tar --no-same-owner -C "$stage" -xzf "$stage/$filename"
+    candidate="$(as_root env GOTOOLCHAIN=local "$stage/go/bin/go" version)"
+    [[ "$(awk '{print $3}' <<<"$candidate")" == "go$GO_VERSION" ]] || {
+        printf 'Downloaded Go version does not match %s\n' "$GO_VERSION" >&2
+        return 1
+    }
+
+    # Hold the destination lock through publication and EXIT rollback.
+    exec 9</usr/local
+    flock -x 9
+    if [[ -e /usr/local/go || -L /usr/local/go ]]; then
+        as_root mv -T -- /usr/local/go "$stage/previous"
+    fi
+    as_root mv -T -- "$stage/go" /usr/local/go
+)
+
 install_go() {
     step "Installing Go $GO_VERSION"
 
@@ -555,50 +593,12 @@ install_go() {
         success "$desired is already installed in /usr/local/go."
     else
         local filename="go${GO_VERSION}.linux-${GO_ARCH}.tar.gz"
-        local archive="$DOWNLOAD_DIR/$filename"
-        local expected actual
+        local expected
         expected="$(resolve_go_checksum "$filename")"
-
-        if [[ -f "$archive" ]]; then
-            actual="$(sha256sum "$archive" | awk '{print $1}')"
-            if [[ "$actual" == "$expected" ]]; then
-                success "Reusing verified $archive."
-            else
-                warn 'Existing Go archive checksum is wrong; downloading it again.'
-                rm -f "$archive"
-            fi
-        fi
-
-        if [[ ! -f "$archive" ]]; then
-            run_logged "Downloading $filename from go.dev" \
-                as_user curl -fL --retry 4 --retry-all-errors \
-                -o "$archive.part" "https://go.dev/dl/$filename"
-            as_user mv "$archive.part" "$archive"
-        fi
-
-        actual="$(sha256sum "$archive" | awk '{print $1}')"
-        [[ "$actual" == "$expected" ]] || {
-            fail "Go checksum mismatch: expected $expected, got $actual"
-            return 1
-        }
-        success 'Go archive checksum verified.'
-
-        local staging_dir
-        staging_dir="$(as_user mktemp -d "$DOWNLOAD_DIR/go.XXXXXX")"
-        run_logged 'Extracting Go into a temporary directory' \
-            as_user tar -C "$staging_dir" -xzf "$archive"
-        [[ "$(GOTOOLCHAIN=local "$staging_dir/go/bin/go" version | awk '{print $3}')" == "$desired" ]] || {
-            fail "Downloaded Go version does not match $GO_VERSION."
-            return 1
-        }
-
-        as_root install -d -m 0755 /usr/local
-        run_logged 'Replacing /usr/local/go' as_root rm -rf /usr/local/go
-        run_logged 'Installing verified Go' \
-            as_root cp -a --no-preserve=ownership "$staging_dir/go" /usr/local/go
+        install_go_release "$filename" "$expected"
     fi
 
-    # Reuse the current PATH or an existing literal PATH assignment.
+    # Manage login PATH independently of this process's (possibly sudo) PATH.
     local go_on_path go_path_value go_path_pattern
     case ":${PATH:-}:" in
         *:/usr/local/go/bin:*|*:/usr/local/go/bin/:*) go_on_path=true ;;
@@ -609,13 +609,18 @@ install_go() {
     go_path_value+="|'([^']*:)?/usr/local/go/bin/?(:[^']*)?'"
     go_path_value+="|([^[:space:]#;\"']*:)?/usr/local/go/bin/?(:[^[:space:]#;\"']*)?)"
     go_path_pattern="^[[:space:]]*(export[[:space:]]+)?PATH=$go_path_value([[:space:]]*(;.*)?|[[:space:]]+#.*)$"
-    if [[ "$go_on_path" == true ]]; then
-        info 'Go is already on PATH; keeping the existing configuration.'
-    elif grep -Eq "$go_path_pattern" /etc/profile; then
+    if grep -Eq "$go_path_pattern" /etc/profile; then
         info '/etc/profile already configures the Go path.'
     else
-        printf '\n%s\n' 'export PATH="/usr/local/go/bin:$PATH"' | \
-            as_root tee -a /etc/profile >/dev/null
+        as_root tee -a /etc/profile >/dev/null <<'EOF'
+
+case ":${PATH:-}:" in
+    *:/usr/local/go/bin:*|*:/usr/local/go/bin/:*) ;;
+    *)
+        export PATH="/usr/local/go/bin:$PATH"
+        ;;
+esac
+EOF
         info 'Added the Go path to /etc/profile.'
     fi
     if [[ "$go_on_path" == false ]]; then
@@ -661,19 +666,19 @@ checkout_repo_ref() {
         as_user git -C "$repo_dir" checkout --detach --force "$commit"
     run_logged "Cleaning source tree $repo_dir" \
         as_user git -C "$repo_dir" clean -fdx
-    printf '%s\n' "$commit"
 }
 
 install_tmux() {
     step "Installing tmux $TMUX_VERSION from its official release archive"
 
     local expected="tmux $TMUX_VERSION"
+    local pending='/usr/local/.server-shells-tmux-installing'
     local current=""
     if [[ -x /usr/local/bin/tmux ]]; then
         current="$(/usr/local/bin/tmux -V 2>/dev/null || true)"
     fi
 
-    if [[ "$current" == "$expected" ]]; then
+    if [[ ! -e "$pending" && "$current" == "$expected" ]]; then
         success "$expected is already installed."
         return
     fi
@@ -700,43 +705,34 @@ install_tmux() {
         return 1
     fi
 
-    run_logged 'Installing tmux' \
-        as_root make -C "$source_dir" install
-
-    hash -r
+    # make install writes several files. A retry must finish an interrupted install.
+    as_root mkdir -p /usr/local
     local installed
-    installed="$(/usr/local/bin/tmux -V 2>/dev/null || true)"
-    [[ "$installed" == "$expected" ]] || {
-        fail "tmux verification failed: expected '$expected', got '$installed'"
-        return 1
-    }
-    success "$installed"
-}
+    {
+        flock -x 9
+        as_root touch "$pending"
+        run_logged 'Installing tmux' \
+            as_root make -C "$source_dir" install
 
-find_tmux_config() {
-    local config_path
-    local config_paths=("$TARGET_HOME/.tmux.conf" "$TARGET_HOME/.config/tmux/tmux.conf")
-    if [[ -n "${XDG_CONFIG_HOME:-}" ]]; then
-        config_paths+=("$XDG_CONFIG_HOME/tmux/tmux.conf")
-    fi
-    for config_path in "${config_paths[@]}"; do
-        if [[ -e "$config_path" || -L "$config_path" ]]; then
-            printf '%s\n' "$config_path"
-            return 0
-        fi
-    done
-    return 1
+        hash -r
+        installed="$(/usr/local/bin/tmux -V 2>/dev/null || true)"
+        [[ "$installed" == "$expected" ]] || {
+            fail "tmux verification failed: expected '$expected', got '$installed'"
+            return 1
+        }
+        as_root rm -f -- "$pending"
+    } 9</usr/local
+    success "$installed"
 }
 
 write_tmux_config() {
     step 'Checking tmux configuration'
 
-    local target
-    if target="$(find_tmux_config)"; then
+    local target="$TARGET_HOME/.tmux.conf"
+    if [[ -e "$target" || -L "$target" ]]; then
         info "Keeping existing $target."
         return
     fi
-    target="$TARGET_HOME/.tmux.conf"
 
     local tmp
     tmp="$(mktemp "$DOWNLOAD_DIR/tmux-config.XXXXXX")"
@@ -773,67 +769,90 @@ EOF
     success "Created $target."
 }
 
-install_vim() {
-    step "Installing Vim from official source ref '$VIM_REF'"
+# A release tag can be recognized from either installer's binary. Other Git
+# refs need both the resolved commit and the digest of the binary it installed.
+vim_matches_target() {
+    local binary="$1" version_long="$2"
+    [[ -x "$binary" ]] && as_user "$binary" -N -u NONE -i NONE -n -es \
+        -c "if ($version_long && v:versionlong != $version_long) || !has('python3_dynamic') || !has('terminal') | cquit 1 | endif" \
+        -c 'qa!'
+}
 
-    (
-        local work_dir cleanup
-        work_dir="$(as_user mktemp -d /tmp/vim-bootstrap.XXXXXX)"
-        # Capture the path before an ERR handler can unwind local variables.
-        printf -v cleanup 'as_root rm -rf -- %q' "$work_dir"
-        trap "$cleanup" EXIT
-
-        local repo_dir="$work_dir/vim"
-        local commit
-        commit="$(checkout_repo_ref 'https://github.com/vim/vim.git' "$repo_dir" "$VIM_REF" | tail -n 1)"
-        local marker='/usr/local/share/ec2-bootstrap/vim-commit'
-
-        if [[ -x /usr/local/bin/vim && -f "$marker" ]] &&
-           [[ "$(cat "$marker")" == "$commit" ]]; then
-            success "Vim source commit $commit is already installed."
-        else
-            run_logged 'Configuring Vim' \
-                as_user bash -lc "cd '$repo_dir' && ./configure \
-                    --prefix=/usr/local \
-                    --with-features=huge \
-                    --enable-multibyte \
-                    --enable-python3interp=dynamic \
-                    --enable-terminal \
-                    --disable-gui \
-                    --without-x"
-            run_logged 'Compiling Vim' \
-                as_user bash -lc "cd '$repo_dir' && make -j'$(nproc)'"
-
-            # Configure can succeed while disabling an unavailable feature.
-            # Check before installing, especially across Ubuntu Python versions.
-            local build_info
-            build_info="$(as_user "$repo_dir/src/vim" --version)"
-            [[ "$build_info" == *'+python3/dyn'* && "$build_info" == *'+terminal'* ]] || {
-                fail 'Built Vim is missing Python 3 dynamic or terminal support.'
-                return 1
-            }
-            run_logged 'Installing Vim' \
-                as_root make -C "$repo_dir" install
-            as_root install -d -m 0755 /usr/local/share/ec2-bootstrap
-            printf '%s\n' "$commit" | as_root tee "$marker" >/dev/null
-            as_root chmod 0644 "$marker"
+install_vim_binary() {
+    local binary='/usr/local/bin/vim' version_long=0
+    local pending='/usr/local/.server-shells-vim-installing'
+    if [[ "$VIM_REF" =~ ^v([0-9]+)[.]([0-9]+)[.]([0-9]+)$ ]]; then
+        version_long=$((10#${BASH_REMATCH[1]} * 1000000 + 10#${BASH_REMATCH[2]} * 10000 + 10#${BASH_REMATCH[3]}))
+        if [[ ! -e "$pending" ]] && vim_matches_target "$binary" "$version_long"; then
+            success "Vim $VIM_REF with Python 3 dynamic and terminal support is already installed."
+            return
         fi
-    )
+    fi
 
-    local installed_info
-    installed_info="$(/usr/local/bin/vim --version)"
-    [[ "$installed_info" == *'+python3/dyn'* && "$installed_info" == *'+terminal'* ]] || {
-        fail 'Installed Vim is missing Python 3 dynamic or terminal support.'
+    local repo_dir="$DOWNLOAD_DIR/vim"
+    checkout_repo_ref 'https://github.com/vim/vim.git' "$repo_dir" "$VIM_REF"
+
+    local marker='/usr/local/share/ec2-bootstrap/vim-commit' commit='' digest
+    if ((version_long == 0)); then
+        commit="$(as_user git -C "$repo_dir" rev-parse HEAD)"
+        if [[ ! -e "$pending" && -f "$marker" ]] && vim_matches_target "$binary" 0; then
+            digest="$(sha256sum "$binary")"
+            if [[ "$(<"$marker")" == "$commit ${digest%% *}" ]]; then
+                success "Vim source commit $commit is already installed."
+                return
+            fi
+        fi
+    fi
+
+    run_logged 'Configuring Vim' \
+        as_user bash -c 'cd "$1" && ./configure \
+            --prefix=/usr/local \
+            --with-features=huge \
+            --enable-multibyte \
+            --enable-python3interp=dynamic \
+            --enable-terminal \
+            --disable-gui \
+            --without-x' bash "$repo_dir"
+    run_logged 'Compiling Vim' as_user make -C "$repo_dir" -j"$(nproc)"
+    vim_matches_target "$repo_dir/src/vim" "$version_long" || {
+        fail "Built Vim does not match $VIM_REF with Python 3 dynamic and terminal support."
         return 1
     }
+    # The executable can be installed before its runtime files.
+    as_root mkdir -p /usr/local
+    {
+        flock -x 9
+        as_root touch "$pending"
+        run_logged 'Installing Vim' as_root make -C "$repo_dir" install
+        vim_matches_target "$binary" "$version_long" || {
+            fail "Installed Vim does not match $VIM_REF with Python 3 dynamic and terminal support."
+            return 1
+        }
+        if [[ -n "$commit" ]]; then
+            as_root install -d -m 0755 /usr/local/share/ec2-bootstrap
+            digest="$(sha256sum "$binary")"
+            printf '%s %s\n' "$commit" "${digest%% *}" | as_root tee "$marker" >/dev/null
+            as_root chmod 0644 "$marker"
+        fi
+        as_root rm -f -- "$pending"
+    } 9</usr/local
+}
+
+install_vim() {
+    step "Installing Vim from official source ref '$VIM_REF'"
+    install_vim_binary
+
+    hash -r
+    success "$(/usr/local/bin/vim --version | sed -n '1p')"
 
     local vimrc="$TARGET_HOME/.vimrc"
     if [[ -e "$vimrc" || -L "$vimrc" ]]; then
         info "Keeping existing $vimrc."
-    else
-        local tmp
-        tmp="$(mktemp)"
-        cat >"$tmp" <<'EOF'
+        return
+    fi
+    local tmp
+    tmp="$(mktemp)"
+    cat >"$tmp" <<'EOF'
 set nocompatible
 set encoding=utf-8
 filetype plugin indent on
@@ -856,13 +875,9 @@ set smartcase
 set mouse=a
 EOF
 
-        as_root install -m 0644 -o "$TARGET_UID" -g "$TARGET_GID" "$tmp" "$vimrc"
-        rm -f "$tmp"
-        success "Created $vimrc."
-    fi
-
-    hash -r
-    success "${installed_info%%$'\n'*}"
+    as_root install -m 0644 -o "$TARGET_UID" -g "$TARGET_GID" "$tmp" "$vimrc"
+    rm -f "$tmp"
+    success "Created $vimrc."
 }
 
 detect_ssm_installation() {
@@ -946,9 +961,20 @@ install_cloudwatch() {
         run_logged 'Installing CloudWatch Agent' apt_env apt-get install -y "$package_file"
     fi
 
-    local config='/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json'
-    as_root install -d -m 0755 "$(dirname "$config")"
-    cat <<'EOF' | as_root tee "$config" >/dev/null
+    local config_dir='/opt/aws/amazon-cloudwatch-agent/etc'
+    local config="$config_dir/amazon-cloudwatch-agent.json" fragment=''
+    if as_root test -d "$config_dir/amazon-cloudwatch-agent.d"; then
+        # The agent leaves .tmp fragments pending until validation succeeds.
+        fragment="$(as_root find "$config_dir/amazon-cloudwatch-agent.d" -maxdepth 1 \
+            \( -type f -o -type l \) ! -name '*.tmp' -print -quit)"
+    fi
+    if [[ -z "$fragment" ]] && ! as_root test -e "$config" && ! as_root test -L "$config" &&
+       ! systemctl is-active --quiet amazon-cloudwatch-agent; then
+        (
+            as_root mkdir -p -- "$config_dir"
+            tmp="$(as_root mktemp "$config_dir/.ec2-bootstrap.XXXXXX")"
+            trap 'as_root rm -f -- "$tmp"' EXIT
+            as_root tee "$tmp" >/dev/null <<'EOF'
 {
   "agent": {
     "metrics_collection_interval": 60
@@ -976,11 +1002,14 @@ install_cloudwatch() {
   }
 }
 EOF
-    as_root chmod 0644 "$config"
-
-    run_logged 'Applying CloudWatch Agent configuration' \
-        as_root /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl \
-        -a fetch-config -m ec2 -s -c "file:$config"
+            as_root chmod 0644 "$tmp"
+            as_root ln -T -- "$tmp" "$config" || as_root test -f "$config"
+        )
+    fi
+    # The packaged systemd service reads the primary JSON and saved fragments
+    # at startup. fetch-config would replace those inputs and restart the agent.
+    run_logged 'Enabling and starting CloudWatch Agent' \
+        as_root systemctl enable --now amazon-cloudwatch-agent
     success "CloudWatch Agent service: $(systemctl is-active amazon-cloudwatch-agent)"
     warn 'Publishing metrics requires an EC2 IAM role with CloudWatchAgentServerPolicy-equivalent permissions.'
 }
@@ -995,7 +1024,7 @@ verify_installation() {
     fi
     if [[ "$INSTALL_TMUX" == true ]]; then
         /usr/local/bin/tmux -V >/dev/null || failed=true
-        find_tmux_config >/dev/null || failed=true
+        [[ -e "$TARGET_HOME/.tmux.conf" || -L "$TARGET_HOME/.tmux.conf" ]] || failed=true
     fi
 
     if [[ "$INSTALL_VIM" == true ]]; then

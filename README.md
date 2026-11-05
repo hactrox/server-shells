@@ -40,8 +40,8 @@ Shared options:
 | --- | --- |
 | `--go` / `--tmux` / `--vim` | Install the corresponding component |
 | `--ssm` | Install or reuse Amazon SSM Agent; enable and start the service |
-| `--cloudwatch` | Install, configure, and start CloudWatch Agent |
-| `--upgrade` | Upgrade system packages before installation |
+| `--cloudwatch` | Install and start CloudWatch Agent, using its existing configuration or creating a default |
+| `--upgrade` | Upgrade system packages before installation and keep locally modified dpkg conffiles |
 | `--ec2` | Enable `--upgrade --go --tmux --ssm --cloudwatch` |
 | `--hostname NAME` | Set the hostname and preserve it in cloud-init |
 | `--hosts-entry` | Add a `127.0.1.1` entry to `/etc/hosts`; requires `--hostname`, usually unnecessary on EC2 |
@@ -54,7 +54,7 @@ Setup logs: `~/downloads/ec2-bootstrap.log` under the invoking user's home direc
 
 ## Install or update software
 
-For Debian 13. No arguments required; the scripts invoke `sudo` as needed.
+For Debian 13 and Ubuntu 24.04 / 26.04 LTS. No arguments required. Run as your regular user. The scripts invoke `sudo` as needed.
 
 ### Go
 
@@ -67,7 +67,7 @@ bash install_update_go.sh
 
 ### tmux
 
-Builds from source and installs to `/usr/local`. Creates a default `~/.tmux.conf` only when no user configuration exists.
+Builds from source and installs to `/usr/local`. Creates a default `~/.tmux.conf` only when the file is missing.
 
 ```bash
 curl -fL -o install_update_tmux.sh https://raw.githubusercontent.com/hactrox/server-shells/main/install_update_tmux.sh &&
