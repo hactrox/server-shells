@@ -66,7 +66,7 @@ remove_systemd_timesyncd() {
     fi
 
 
-    if systemctl list-unit-files \
+    if systemctl list-unit-files systemd-timesyncd.service --no-legend \
         | grep -q "^systemd-timesyncd.service"; then
 
         log "Stopping systemd-timesyncd"
@@ -79,7 +79,7 @@ remove_systemd_timesyncd() {
 }
 
 
-ensure_chrony_config() {
+ensure_chrony_config() (
 
     if [[ ! -f "${CHRONY_CONF}" ]]; then
         echo "ERROR: ${CHRONY_CONF} not found"
@@ -87,35 +87,12 @@ ensure_chrony_config() {
     fi
 
 
-    local tmp
+    config=$(realpath "$CHRONY_CONF")
+    tmp=$(mktemp "${config}.XXXXXX")
+    trap 'rm -f -- "$tmp"' EXIT
+    cp -p -- "$config" "$tmp"
 
-    tmp=$(mktemp)
-
-
-    # Remove previous managed block
-    awk "
-        BEGIN {
-            skip=0
-        }
-
-        /${MANAGED_BEGIN}/ {
-            skip=1
-        }
-
-        /${MANAGED_END}/ {
-            skip=0
-            next
-        }
-
-        skip==0 {
-            print
-        }
-    " "${CHRONY_CONF}" > "${tmp}"
-
-
-    cat >> "${tmp}" <<EOF
-
-
+    block=$(cat <<EOF
 ${MANAGED_BEGIN}
 
 # AWS Time Sync Service
@@ -132,45 +109,52 @@ rtcsync
 
 ${MANAGED_END}
 EOF
+    )
 
+    # Replace the existing block in place so administrator directives keep
+    # their order. Reject broken markers before replacing the live file.
+    if ! CHRONY_BLOCK="$block" awk -v begin="$MANAGED_BEGIN" -v end="$MANAGED_END" '
+        BEGIN { block = ENVIRON["CHRONY_BLOCK"] }
+        $0 == begin {
+            if (inside) exit 1
+            if (!seen) print block
+            inside = seen = 1
+            next
+        }
+        $0 == end {
+            if (!inside) exit 1
+            inside = 0
+            next
+        }
+        !inside { print }
+        END {
+            if (inside) exit 1
+            if (!seen) print block
+        }
+    ' "$config" > "$tmp"; then
+        echo "ERROR: malformed AWS time sync markers in $config" >&2
+        return 1
+    fi
 
-    if cmp -s "${CHRONY_CONF}" "${tmp}"; then
-
+    if cmp -s "$config" "$tmp"; then
         log "chrony configuration unchanged"
-
-        rm -f "${tmp}"
-
-        CHRONY_CHANGED=0
-
-    else
-
-        log "Updating chrony configuration"
-
-        cp "${CHRONY_CONF}" \
-           "${CHRONY_CONF}.backup"
-
-        mv "${tmp}" "${CHRONY_CONF}"
-
-        CHRONY_CHANGED=1
+        systemctl enable --now "$CHRONY_SERVICE"
+        return
     fi
-}
 
-
-restart_chrony_if_needed() {
-
-    if [[ "${CHRONY_CHANGED}" -eq 1 ]]; then
-
-        log "Restarting chrony"
-
-        systemctl enable chrony
-        systemctl restart chrony
-
-    else
-
-        log "Skipping chrony restart"
-
+    log "Updating chrony configuration"
+    chronyd -p -f "$tmp" >/dev/null
+    systemctl enable "$CHRONY_SERVICE"
+    cp -p -- "$config" "${CHRONY_CONF}.backup"
+    mv -- "$tmp" "$config"
+    if ! systemctl restart "$CHRONY_SERVICE"; then
+        echo "ERROR: chrony restart failed; restoring the previous configuration" >&2
+        cp -p -- "${CHRONY_CONF}.backup" "$tmp"
+        mv -- "$tmp" "$config"
+        systemctl restart "$CHRONY_SERVICE"
+        return 1
     fi
-}
+)
 
 
 wait_for_sync() {
@@ -213,16 +197,11 @@ main() {
 
     require_root
 
-    CHRONY_CHANGED=0
-
-
     install_chrony
 
     remove_systemd_timesyncd
 
     ensure_chrony_config
-
-    restart_chrony_if_needed
 
     wait_for_sync
 
