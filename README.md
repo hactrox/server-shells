@@ -4,7 +4,7 @@ Scripts for server setup, software installation, and configuration.
 
 ## Server setup
 
-Both scripts support `amd64` / `arm64`. Base setup installs APT prerequisites and Git, and configures the `en_US.UTF-8` locale. Additional components are enabled through options.
+Both scripts support `amd64` / `arm64`. Base setup installs APT prerequisites and Git, configures the `en_US.UTF-8` locale, and adds global `ls`, `ll` and `l` aliases for interactive Bash. Additional components are enabled through options.
 
 ### Debian 13
 

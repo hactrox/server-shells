@@ -5,6 +5,7 @@
 #   - APT prerequisites
 #   - en_US.UTF-8 locale
 #   - Git from Debian APT
+#   - System-wide interactive Bash aliases: ls, ll and l
 #
 # OPTIONAL SYSTEM CONFIGURATION:
 #   --hostname NAME  Set the static hostname and preserve it in cloud-init
@@ -85,6 +86,7 @@ Usage:
   sudo ./debian13-ec2-bootstrap.sh [options]
 
 Base setup always installs APT prerequisites, en_US.UTF-8 locale and Git.
+It also configures system-wide ls, ll and l aliases for interactive Bash.
 Go, tmux, Vim, MySQL, SSM Agent and CloudWatch Agent are optional.
 The --ec2 preset enables system upgrade, Go, tmux, SSM Agent and CloudWatch Agent.
 User-owned files are created for the invoking account. Under sudo, SUDO_USER is
@@ -373,8 +375,8 @@ validate_inputs() {
 }
 
 calculate_steps() {
-    # Base: APT index, packages, locale, hostname/cloud-init and verification.
-    TOTAL_STEPS=5
+    # Base: APT index, packages, locale, Bash aliases, hostname/cloud-init and verification.
+    TOTAL_STEPS=6
     [[ "$INSTALL_GO" == true ]] && TOTAL_STEPS=$((TOTAL_STEPS + 1))
     # tmux installation and tmux configuration are separate steps.
     [[ "$INSTALL_TMUX" == true ]] && TOTAL_STEPS=$((TOTAL_STEPS + 2))
@@ -444,6 +446,35 @@ configure_locale() {
 
     run_logged 'Setting default LANG=en_US.UTF-8' as_root update-locale LANG=en_US.UTF-8
     export LANG=en_US.UTF-8
+}
+
+configure_bash_aliases() {
+    step 'Configuring system-wide Bash aliases'
+
+    local bashrc='/etc/bash.bashrc'
+    local marker='# server-shells: global ls aliases'
+    if grep -Fqx "$marker" "$bashrc"; then
+        success 'System-wide Bash aliases are already configured.'
+        return
+    fi
+
+    as_root tee -a "$bashrc" >/dev/null <<'EOF'
+
+# server-shells: global ls aliases
+# Defaults for all interactive Bash users; ~/.bashrc can override these.
+case $- in
+    *i*)
+        # Preserve an existing value, including an explicitly empty one.
+        : "${LS_OPTIONS=--color=auto}"
+        export LS_OPTIONS
+        eval "$(dircolors -b)"
+        alias ls='ls $LS_OPTIONS'
+        alias ll='ls $LS_OPTIONS -l'
+        alias l='ls $LS_OPTIONS -lA'
+        ;;
+esac
+EOF
+    success "Configured ls, ll and l aliases in $bashrc."
 }
 
 manage_hosts_entry() {
@@ -1089,6 +1120,8 @@ print_summary() {
     printf 'Temporary downloads: %s (removed on exit)\n' "$DOWNLOAD_DIR"
     printf 'Log         : %s\n' "$LOG_FILE"
     printf 'Git         : %s\n' "$(git --version)"
+    printf 'Bash aliases: ls, ll, l (system-wide defaults; user aliases take precedence)\n'
+    printf 'To load these aliases in an existing Bash shell, run: source /etc/bash.bashrc\n'
     [[ -z "$TARGET_HOSTNAME" ]] || printf 'Hostname    : %s\n' "$(hostnamectl --static)"
     [[ "$INSTALL_GO" != true ]] || printf 'Go          : %s\n' "$(GOTOOLCHAIN=local /usr/local/go/bin/go version)"
     [[ "$INSTALL_TMUX" != true ]] || printf 'tmux        : %s\n' "$(/usr/local/bin/tmux -V)"
@@ -1121,6 +1154,7 @@ main() {
     update_apt
     install_base_packages
     configure_locale
+    configure_bash_aliases
     configure_hostname
     [[ "$INSTALL_GO" != true ]] || install_go
     if [[ "$INSTALL_TMUX" == true ]]; then
