@@ -9,29 +9,27 @@ Both scripts support `amd64` / `arm64`. Base setup installs APT prerequisites an
 ### Debian 13
 
 ```bash
-curl -fL -o bootstrap_debian13.sh https://raw.githubusercontent.com/hactrox/server-shells/main/bootstrap_debian13.sh &&
-sudo bash bootstrap_debian13.sh
+(script=$(curl -fsSL https://github.com/hactrox/server-shells/raw/main/bootstrap_debian13.sh) && sudo bash -c "$script")
 ```
 
 Common examples:
 
 ```bash
-bash bootstrap_debian13.sh --help
-sudo bash bootstrap_debian13.sh --ec2 --hostname my-server --vim
+(script=$(curl -fsSL https://github.com/hactrox/server-shells/raw/main/bootstrap_debian13.sh) && bash -c "$script" -- --help)
+(script=$(curl -fsSL https://github.com/hactrox/server-shells/raw/main/bootstrap_debian13.sh) && sudo bash -c "$script" -- --ec2 --hostname my-server --vim)
 ```
 
 ### Ubuntu 24.04 / 26.04 LTS
 
 ```bash
-curl -fL -o bootstrap_ubuntu.sh https://raw.githubusercontent.com/hactrox/server-shells/main/bootstrap_ubuntu.sh &&
-sudo bash bootstrap_ubuntu.sh
+(script=$(curl -fsSL https://github.com/hactrox/server-shells/raw/main/bootstrap_ubuntu.sh) && sudo bash -c "$script")
 ```
 
 Common examples:
 
 ```bash
-bash bootstrap_ubuntu.sh --help
-sudo bash bootstrap_ubuntu.sh --ec2 --hostname my-server --vim
+(script=$(curl -fsSL https://github.com/hactrox/server-shells/raw/main/bootstrap_ubuntu.sh) && bash -c "$script" -- --help)
+(script=$(curl -fsSL https://github.com/hactrox/server-shells/raw/main/bootstrap_ubuntu.sh) && sudo bash -c "$script" -- --ec2 --hostname my-server --vim)
 ```
 
 Shared options:
@@ -61,8 +59,7 @@ For Debian 13 and Ubuntu 24.04 / 26.04 LTS. No arguments required. Run as your r
 Supports `amd64` / `arm64`. Installs to `/usr/local/go`.
 
 ```bash
-curl -fL -o install_update_go.sh https://raw.githubusercontent.com/hactrox/server-shells/main/install_update_go.sh &&
-bash install_update_go.sh
+(script=$(curl -fsSL https://github.com/hactrox/server-shells/raw/main/install_update_go.sh) && bash -c "$script")
 ```
 
 ### tmux
@@ -70,8 +67,7 @@ bash install_update_go.sh
 Builds from source and installs to `/usr/local`. Creates a default `~/.tmux.conf` only when the file is missing.
 
 ```bash
-curl -fL -o install_update_tmux.sh https://raw.githubusercontent.com/hactrox/server-shells/main/install_update_tmux.sh &&
-bash install_update_tmux.sh
+(script=$(curl -fsSL https://github.com/hactrox/server-shells/raw/main/install_update_tmux.sh) && bash -c "$script")
 ```
 
 ### Vim
@@ -79,8 +75,7 @@ bash install_update_tmux.sh
 Builds from source and installs to `/usr/local`. Creates a default `~/.vimrc` only when the file is missing.
 
 ```bash
-curl -fL -o install_update_vim.sh https://raw.githubusercontent.com/hactrox/server-shells/main/install_update_vim.sh &&
-bash install_update_vim.sh
+(script=$(curl -fsSL https://github.com/hactrox/server-shells/raw/main/install_update_vim.sh) && bash -c "$script")
 ```
 
 Versions are pinned in variables near the top of each script; version arguments are not supported. After installation, follow the script output to update PATH or refresh the shell's command cache.
@@ -90,8 +85,7 @@ Versions are pinned in variables near the top of each script; version arguments 
 For Debian 13 on **EC2**. Installs chrony, removes systemd-timesyncd, and configures AWS Time Sync Service (`169.254.169.123`).
 
 ```bash
-curl -fL -o config_chronyc.sh https://raw.githubusercontent.com/hactrox/server-shells/main/config_chronyc.sh &&
-sudo bash config_chronyc.sh
+(script=$(curl -fsSL https://github.com/hactrox/server-shells/raw/main/config_chronyc.sh) && sudo bash -c "$script")
 ```
 
 ## Create an SSH user
@@ -101,6 +95,5 @@ For Debian 13. Creates a user without sudo privileges and installs an Ed25519 SS
 The SSH server must have public key authentication enabled and password and keyboard-interactive authentication disabled. The script checks these settings without changing them.
 
 ```bash
-curl -fL -o debian_13_create_user.sh https://raw.githubusercontent.com/hactrox/server-shells/main/debian_13_create_user.sh &&
-sudo bash debian_13_create_user.sh newuser 'ssh-ed25519 AAAA... your-key-comment'
+(script=$(curl -fsSL https://github.com/hactrox/server-shells/raw/main/debian_13_create_user.sh) && sudo bash -c "$script" -- newuser 'ssh-ed25519 AAAA... your-key-comment')
 ```
